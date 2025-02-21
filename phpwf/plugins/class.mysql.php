@@ -935,7 +935,12 @@ class DB{
         DevTools::Add('','','Update',$sql);
       }
       $this->LogSQL($sql,'update');
-      $query = mysqli_query($this->connection,$sql);
+      try{
+        $query = mysqli_query($this->connection,$sql);
+
+      } catch (Exception $e){
+        die();
+      }
       if(mysqli_errno($this->connection) === 1118) {
         mysqli_query($this->connection, 'SET innodb_strict_mode = OFF;');
         $query = mysqli_query($this->connection,$sql);
