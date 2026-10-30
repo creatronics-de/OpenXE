@@ -9292,7 +9292,6 @@ XML;
         return 5;
       }
     }
-    $this->getEmailSettings();
     $this->app->erp->BelegVersand($doctype, $id, $type, $printer);
 
     if(!$intern){
