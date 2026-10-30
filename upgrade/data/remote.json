@@ -1,4 +1,15 @@
-{
-    "host": "https://github.com/openxe-org/openxe.git",
-    "branch": "master"
-}
+[
+    {
+        "name": "1.13",
+        "enabled": true,
+        "active": true,
+        "description": {
+            "en": "OpenXE Version 1.13, requires PHP 8.3 or higher",
+            "de": "OpenXE Version 1.13, benötigt mindestens PHP 8.3"
+        },
+        "host": "https://github.com/openxe-org/openxe.git",
+        "branch": "1.13",
+        "check": "1.13/check.php",
+        "migration": "1.13/migrate.php"
+    }
+]
