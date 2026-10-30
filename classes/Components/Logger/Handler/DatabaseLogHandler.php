@@ -63,10 +63,20 @@ final class DatabaseLogHandler extends AbstractLogHandler
             $values['dump'] .= print_r($context->getDump(), true);
         }
 
-        $dumpsplit = str_split((string) $values['dump'], 10000);
+        if (empty($values['dump'])) {
+            $dumpsplit = array(0 => '');
+        } else {
+            $dumpsplit = str_split((string) $values['dump'], 10000);
+        }
 
+        $split = 1;
+        $splitcount = count($dumpsplit);
         foreach ($dumpsplit as $dump) {
             $values['dump'] = $dump;
+            if ($splitcount > 1) {
+                $values['message'] = $message." (".$split."/".$splitcount.")";
+                $split++;
+            }
             $sql = 'INSERT INTO `log`
                     (`log_time`, `level`, `message`, `class`, `method`, `line`, `origin_type`, `origin_detail`, `dump`)
                     VALUES
