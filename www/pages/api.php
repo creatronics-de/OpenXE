@@ -8968,8 +8968,17 @@ XML;
         break;
     }
 
+    // Entwurf: keine Belegnummer, Status bleibt angelegt (Nummer erst bei Freigabe in OpenXE)
+    $entwurf = isset($xmldata['entwurf']) && !is_array($xmldata['entwurf'])
+      && in_array(strtolower(trim((string)$xmldata['entwurf'])), ['1', 'true', 'ja', 'yes'], true);
+    unset($xmldata['entwurf']);
+
     $xmldata['belegnr'] = (string)$this->app->DB->Select("SELECT belegnr FROM $doctype WHERE id = '$id' LIMIT 1");
-    if($xmldata['belegnr'] === '' || $xmldata['belegnr'] === '0'){$xmldata['belegnr'] = $this->app->erp->GetNextNummer($doctype,$xmldata['projekt'],$id);}
+    if($entwurf) {
+      $xmldata['belegnr'] = '';
+      $xmldata['status'] = 'angelegt';
+    }
+    elseif($xmldata['belegnr'] === '' || $xmldata['belegnr'] === '0'){$xmldata['belegnr'] = $this->app->erp->GetNextNummer($doctype,$xmldata['projekt'],$id);}
     if($doctype === 'bestellung')
     {
       $xmldata['lieferantkdrnummer'] = $xmldata['lieferantennummer'];
@@ -9027,7 +9036,9 @@ XML;
     if(!isset($xmldata['status'])){
       $xmldata['status'] = 'freigegeben';
     }
-    $this->app->DB->Update("UPDATE $doctype SET status='freigegeben' WHERE id='".$id."' AND (status = 'angelegt' OR status = '') LIMIT 1");
+    if(!$entwurf) {
+      $this->app->DB->Update("UPDATE $doctype SET status='freigegeben' WHERE id='".$id."' AND (status = 'angelegt' OR status = '') LIMIT 1");
+    }
     $this->ApiBelegEdit(true,$id, $doctype, $xmldata);
     if($intern){
       return $id;
