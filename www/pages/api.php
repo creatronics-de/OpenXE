@@ -8968,8 +8968,17 @@ XML;
         break;
     }
 
+    // Entwurf: keine Belegnummer, Status bleibt angelegt (Nummer erst bei Freigabe in OpenXE)
+    $entwurf = isset($xmldata['entwurf']) && !is_array($xmldata['entwurf'])
+      && in_array(strtolower(trim((string)$xmldata['entwurf'])), ['1', 'true', 'ja', 'yes'], true);
+    unset($xmldata['entwurf']);
+
     $xmldata['belegnr'] = (string)$this->app->DB->Select("SELECT belegnr FROM $doctype WHERE id = '$id' LIMIT 1");
-    if($xmldata['belegnr'] === '' || $xmldata['belegnr'] === '0'){$xmldata['belegnr'] = $this->app->erp->GetNextNummer($doctype,$xmldata['projekt'],$id);}
+    if($entwurf) {
+      $xmldata['belegnr'] = '';
+      $xmldata['status'] = 'angelegt';
+    }
+    elseif($xmldata['belegnr'] === '' || $xmldata['belegnr'] === '0'){$xmldata['belegnr'] = $this->app->erp->GetNextNummer($doctype,$xmldata['projekt'],$id);}
     if($doctype === 'bestellung')
     {
       $xmldata['lieferantkdrnummer'] = $xmldata['lieferantennummer'];
@@ -9027,7 +9036,9 @@ XML;
     if(!isset($xmldata['status'])){
       $xmldata['status'] = 'freigegeben';
     }
-    $this->app->DB->Update("UPDATE $doctype SET status='freigegeben' WHERE id='".$id."' AND (status = 'angelegt' OR status = '') LIMIT 1");
+    if(!$entwurf) {
+      $this->app->DB->Update("UPDATE $doctype SET status='freigegeben' WHERE id='".$id."' AND (status = 'angelegt' OR status = '') LIMIT 1");
+    }
     $this->ApiBelegEdit(true,$id, $doctype, $xmldata);
     if($intern){
       return $id;
@@ -9869,8 +9880,40 @@ XML;
     // alle positionen der reihe nach
 
     $cposition = isset($xmldata['artikelliste']['position'])?count($xmldata['artikelliste']['position']):0;
+
+    // Zwischenpositionen (Gruppenueberschrift, Zwischensumme, Gruppensumme, Seitenumbruch) per API:
+    // Eintraege in artikelliste/position mit Feld postype. Sobald der Aufruf mindestens eine
+    // Zwischenposition enthaelt, werden die bisherigen Zwischenpositionen des Belegs ersetzt.
+    $hatZwischenpositionen = false;
+    for($i=0;$i<$cposition;$i++) {
+      if($this->ApiBelegIstZwischenposition($xmldata['artikelliste']['position'][$i])) {
+        $hatZwischenpositionen = true;
+        break;
+      }
+    }
+    if($hatZwischenpositionen) {
+      $this->app->DB->Delete(
+        sprintf(
+          "DELETE FROM `beleg_zwischenpositionen` WHERE `doctype` = '%s' AND `doctypeid` = %d",
+          $this->app->DB->real_escape_string($doctype), $id
+        )
+      );
+    }
+    $artikelpositionen = 0;
+    $zwischenpositionSort = 0;
+
     for($i=0;$i<$cposition;$i++)
     {
+      if($this->ApiBelegIstZwischenposition($xmldata['artikelliste']['position'][$i])) {
+        // pos = Anzahl der Artikelpositionen davor (0 = vor der ersten Position)
+        $this->ApiBelegZwischenpositionAnlegen(
+          $doctype, $id, $artikelpositionen, $zwischenpositionSort, $xmldata['artikelliste']['position'][$i]
+        );
+        $zwischenpositionSort++;
+        continue;
+      }
+      $artikelpositionen++;
+      $zwischenpositionSort = 0;
       $projektid = $this->app->DB->Select("SELECT id FROM projekt WHERE abkuerzung='".$xmldata['artikelliste']['position'][$i]['projekt']."' LIMIT 1");
       if(!empty($xmldata['artikelliste']['position'][$i]['nummer'])){
         if($projektid > 0){
@@ -9955,7 +9998,7 @@ XML;
         }
       }
 
-      $this->app->DB->Insert("INSERT INTO $doctype"."_position (id,$doctype,sort,artikel) VALUES ('','".$id."','".($i+1)."','".$positionid."')");
+      $this->app->DB->Insert("INSERT INTO $doctype"."_position (id,$doctype,sort,artikel) VALUES ('','".$id."','".$artikelpositionen."','".$positionid."')");
       $positionid= $this->app->DB->GetInsertID();
       $this->app->erp->RunHook('beleg_afterinsertposition', 5, $doctype,$id,$tmpartikelid,$xmldata['artikelliste']['position'][$i]['menge'],$positionid);
 
@@ -10047,6 +10090,106 @@ XML;
     }
     $this->XMLResponse(1,"<id>$id</id><belegnr>".$xmldata['belegnr'].'</belegnr>');
     $this->app->ExitXentral();
+  }
+
+    /**
+     * Zwischenpositionstypen, die per API in artikelliste/position angelegt werden koennen.
+     */
+  protected static $apiZwischenpositionTypen = [
+    'gruppe', 'zwischensumme', 'gruppensumme', 'gruppensummemitoptionalenpreisen', 'seitenumbruch'
+  ];
+
+    /**
+     * Prueft, ob ein Eintrag aus artikelliste/position eine Zwischenposition ist (Feld postype).
+     *
+     * @param mixed $position
+     *
+     * @return bool
+     */
+  protected function ApiBelegIstZwischenposition($position)
+  {
+    if(!is_array($position) || !isset($position['postype']) || !is_string($position['postype'])) {
+      return false;
+    }
+    return in_array(strtolower(trim($position['postype'])), self::$apiZwischenpositionTypen, true);
+  }
+
+    /**
+     * Legt eine Zwischenposition (z.B. Gruppenueberschrift) an, wie es die Positionsansicht tut.
+     *
+     * Felder: postype, name oder bezeichnung, kurztext oder beschreibung,
+     * optional Fett, Unterstrichen, Schriftgroesse, Abstand_Oben, Abstand_Unten, Abstand_Links.
+     *
+     * @param string $doctype
+     * @param int    $doctypeid
+     * @param int    $pos       Anzahl der Artikelpositionen davor
+     * @param int    $sort      Reihenfolge innerhalb derselben pos
+     * @param array  $position
+     *
+     * @return int ID in beleg_zwischenpositionen
+     */
+  protected function ApiBelegZwischenpositionAnlegen($doctype, $doctypeid, $pos, $sort, $position)
+  {
+    $postype = strtolower(trim($position['postype']));
+    $text = function($felder) use ($position) {
+      foreach($felder as $feld) {
+        if(isset($position[$feld]) && !is_array($position[$feld]) && (string)$position[$feld] !== '') {
+          return (string)$position[$feld];
+        }
+      }
+      return null;
+    };
+
+    // gleiche Standardwerte wie Yui::getStandardDrawJSON()
+    $data = [];
+    if($postype !== 'seitenumbruch') {
+      $data = [
+        'name'           => $text(['name', 'bezeichnung']),
+        'kurztext'       => $text(['kurztext', 'beschreibung']),
+        'Abstand_Oben'   => 0,
+        'Abstand_Unten'  => 5,
+        'Schriftgroesse' => 8,
+        'Fett'           => true,
+        'Unterstrichen'  => false,
+      ];
+      if($postype === 'gruppe') {
+        $data['Abstand_Links'] = 0;
+        $data['Kurztext_Abstand_Links'] = 0;
+        $data['Kurztext_Unterstrichen'] = false;
+      }
+      else {
+        $data['Rahmen_Links'] = false;
+        $data['Rahmen_Rechts'] = false;
+        $data['Rahmen_Oben'] = false;
+        $data['Rahmen_Unten'] = false;
+        $data['Text_Ausrichtung'] = 'R';
+      }
+      foreach(['Fett', 'Unterstrichen'] as $feld) {
+        if(isset($position[$feld]) && !is_array($position[$feld])) {
+          $data[$feld] = in_array(strtolower((string)$position[$feld]), ['1', 'true', 'ja', 'yes'], true);
+        }
+      }
+      foreach(['Schriftgroesse', 'Abstand_Oben', 'Abstand_Unten', 'Abstand_Links'] as $feld) {
+        if(isset($position[$feld]) && !is_array($position[$feld]) && is_numeric($position[$feld])) {
+          $data[$feld] = (int)$position[$feld];
+        }
+      }
+    }
+
+    $this->app->DB->Insert(
+      sprintf(
+        "INSERT INTO `beleg_zwischenpositionen` (`doctype`, `doctypeid`, `pos`, `sort`, `postype`, `wert`)
+        VALUES ('%s', %d, %d, %d, '%s', '%s')",
+        $this->app->DB->real_escape_string($doctype),
+        (int)$doctypeid,
+        (int)$pos,
+        (int)$sort,
+        $this->app->DB->real_escape_string($postype),
+        $this->app->DB->real_escape_string(json_encode($data ?: new stdClass()))
+      )
+    );
+
+    return (int)$this->app->DB->GetInsertID();
   }
 
     /**
@@ -10949,9 +11092,9 @@ XML;
 
     foreach ($xmldata->xml->artikel as $artikel){
       if($artikel->id > 0)
-        $id = $this->app->DB->Select("SELECT id FROM artikel WHERE id='$artikel->id' LIMIT 1");
-      else if ($artikel->nummer!="")
-        $id = $this->app->DB->Select("SELECT id FROM artikel WHERE nummer='".$artikel->nummer."' LIMIT 1");
+        $id = $this->app->DB->Select("SELECT id FROM artikel WHERE id='".(int)$artikel->id."' LIMIT 1");
+      else if ((string)$artikel->nummer!="")
+        $id = $this->app->DB->Select("SELECT id FROM artikel WHERE nummer='".(string)$artikel->nummer."' LIMIT 1");
 
       if($id<=0) continue;
       $this->app->erp->SetzteSperreAPIArtikelPreise($id);
@@ -10959,14 +11102,20 @@ XML;
       foreach ($artikel->verkaufspreise as $vk) {
         foreach ($vk->staffelpreis as $staffelpreis) {
 
-          if($staffelpreis->kundennummer!="")
-            $staffelpreis->adresse = $this->app->DB->Select("SELECT id FROM adresse WHERE kundennummer='".$staffelpreis->kundennummer."' LIMIT 1");
-          if($staffelpreis->gruppe > 0)
-            $this->app->erp->AddVerkaufspreisGruppe($id,$staffelpreis->ab_menge,$staffelpreis->gruppe,$staffelpreis->preis);
-          else if($staffelpreis->adresse > 0)
-            $this->app->erp->AddVerkaufspreis($id,$staffelpreis->ab_menge,$staffelpreis->adresse,$staffelpreis->preis);
-          else if($staffelpreis->kundennummer=="" && $staffelpreis->adresse <= 0)
-            $this->app->erp->AddVerkaufspreis($id,$staffelpreis->ab_menge,0,$staffelpreis->preis);
+          // SimpleXML-Werte typisieren (PHP 8: round() u. a. akzeptieren kein SimpleXMLElement)
+          $kundennummer = (string)$staffelpreis->kundennummer;
+          $gruppe = (int)$staffelpreis->gruppe;
+          $abmenge = (float)str_replace(',','.',(string)$staffelpreis->ab_menge);
+          $preis = (float)str_replace(',','.',(string)$staffelpreis->preis);
+          $adresse = (int)$staffelpreis->adresse;
+          if($kundennummer!="")
+            $adresse = (int)$this->app->DB->Select("SELECT id FROM adresse WHERE kundennummer='".$kundennummer."' LIMIT 1");
+          if($gruppe > 0)
+            $this->app->erp->AddVerkaufspreisGruppe($id,$abmenge,$gruppe,$preis);
+          else if($adresse > 0)
+            $this->app->erp->AddVerkaufspreis($id,$abmenge,$adresse,$preis);
+          else if($kundennummer=="" && $adresse <= 0)
+            $this->app->erp->AddVerkaufspreis($id,$abmenge,0,$preis);
         }
       }
 
@@ -10974,11 +11123,11 @@ XML;
       foreach ($artikel->einkaufspreise as $ek) {
         foreach ($ek->staffelpreis as $staffelpreis) {
 
-    $lieferantadresse = $this->app->DB->Select("SELECT id FROM adresse WHERE lieferantennummer='".$staffelpreis->lieferantennummer."' AND lieferantennummer!='' LIMIT 1");
+    $lieferantadresse = $this->app->DB->Select("SELECT id FROM adresse WHERE lieferantennummer='".(string)$staffelpreis->lieferantennummer."' AND lieferantennummer!='' LIMIT 1");
     if($lieferantadresse > 0)
     {
-            $this->app->erp->AddEinkaufspreis($id,$staffelpreis->ab_menge,$lieferantadresse,$staffelpreis->bestellnummer,$staffelpreis->bezeichnunglieferant,
-    $staffelpreis->preis,$staffelpreis->waehrung);
+            $this->app->erp->AddEinkaufspreis($id,(float)str_replace(',','.',(string)$staffelpreis->ab_menge),$lieferantadresse,(string)$staffelpreis->bestellnummer,(string)$staffelpreis->bezeichnunglieferant,
+    (float)str_replace(',','.',(string)$staffelpreis->preis),(string)$staffelpreis->waehrung);
     }
         }
       }
@@ -12707,6 +12856,30 @@ XML;
         $result .='</position>';
       }
       $result .='</artikelliste>';
+
+      $zwischenpositionen = $this->app->DB->SelectArr(
+        sprintf(
+          "SELECT `id`, `pos`, `sort`, `postype`, `wert` FROM `beleg_zwischenpositionen`
+          WHERE `doctype` = '%s' AND `doctypeid` = %d ORDER BY `pos`, `sort`",
+          $this->app->DB->real_escape_string($doctype), (int)$id
+        )
+      );
+      $result .= '<zwischenpositionen>';
+      foreach((array)$zwischenpositionen as $zwischenposition) {
+        $wert = json_decode((string)$zwischenposition['wert'], true);
+        $zwischenposition['name'] = is_array($wert) && isset($wert['name']) ? (string)$wert['name'] : '';
+        $zwischenposition['kurztext'] = is_array($wert) && isset($wert['kurztext']) ? (string)$wert['kurztext'] : '';
+        $result .= '<zwischenposition>';
+        foreach($zwischenposition as $key => $value) {
+          if($cdata && $value != '' && !is_numeric($value)) {
+            $result .= '<' . $key . '><![CDATA[' . $value . ']]></' . $key . '>';
+          }else{
+            $result .= '<' . $key . '>' . $this->GetPlainText($value) . '</' . $key . '>';
+          }
+        }
+        $result .= '</zwischenposition>';
+      }
+      $result .= '</zwischenpositionen>';
       return $result;
     }
 
